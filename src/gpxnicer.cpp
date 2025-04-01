@@ -19,6 +19,26 @@ struct GpxPoint {
 // Forward declaration for the fallback function
 cv::Mat downloadOpenStreetMapTile(double north, double south, double east, double west, int width, int height);
 
+// Convert WGS84 (lat/lon) to Web Mercator coordinates
+void latLonToWebMercator(double lat, double lon, double& x, double& y) {
+    // Convert to radians
+    lat = lat * M_PI / 180.0;
+    lon = lon * M_PI / 180.0;
+    
+    // Web Mercator projection (EPSG:3857)
+    x = (lon + M_PI) / (2.0 * M_PI);
+    y = (1.0 - log(tan(lat) + 1.0 / cos(lat)) / M_PI) / 2.0;
+}
+
+// Convert Web Mercator coordinates to pixel coordinates
+cv::Point webMercatorToPixel(double x, double y, double west, double east, double north, double south, int width, int height) {
+    // Convert Web Mercator coordinates to pixel coordinates
+    int pixelX = static_cast<int>(std::round(((x - west) / (east - west)) * width));
+    int pixelY = static_cast<int>(std::round(((y - north) / (south - north)) * height));
+    
+    return cv::Point(pixelX, pixelY);
+}
+
 // Function to write CURL data to memory
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
     size_t newLength = size * nmemb;
@@ -40,14 +60,18 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
     double centerLat = (north + south) / 2.0;
     double centerLon = (east + west) / 2.0;
     
-    // Calculate appropriate zoom level based on the bounding box size
-    double latDiff = north - south;
-    double lonDiff = east - west;
-    int zoom = 12; // Default zoom level
-    
-    // Adjust zoom level based on the area size
-    if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
-    else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
+    // Dynamically calculate zoom level based on region width and output image width.
+    // At zoom level z, one tile covers a normalized width of 1/(2^z) (with nominal tile size 256px).
+    // Using our conversion, the relation is:
+    //   2^z ≈ (width * 360) / (256 * (east - west))
+    // Thus, z = log2((width * 360) / (256 * (east - west)))
+    double regionWidthDeg = east - west; // in degrees
+    double computed = (width * 360.0) / (256.0 * regionWidthDeg);
+    int calculatedZoom = static_cast<int>(std::log2(computed));
+    // Clamp zoom to a valid range (e.g., 0 to 19)
+    if (calculatedZoom < 0) calculatedZoom = 0;
+    if (calculatedZoom > 19) calculatedZoom = 19;
+    int zoom = calculatedZoom;
     
     // Use LINZ basemap API with aerial imagery
     // Format: https://basemaps.linz.govt.nz/v1/tiles/{tileset_name}/{crs}/{z}/{x}/{y}.{format}?api={api_key}
@@ -55,13 +79,14 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
     // Convert lat/lon to tile coordinates (Web Mercator)
     int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
     int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
+    y = (1 << zoom) - 1 - y; // Flip y coordinate for LINZ tile service to correct offset
     
     // Use aerial imagery with EPSG:3857 projection (Web Mercator)
     std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
                       std::to_string(zoom) + "/" + 
                       std::to_string(x) + "/" + 
                       std::to_string(y) + 
-                      ".png?api=d01egend5f7kzm4m56pdbgng";
+                      ".png?api=d01jrm3t2gzdycm5j8rh03e69fw";
     
     std::cout << "Downloading map from LINZ: " << url << std::endl;
     std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
@@ -127,40 +152,31 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
     
     std::cout << "Falling back to OpenStreetMap..." << std::endl;
     
-    // Create a blank image with grid lines as a last resort
-    cv::Mat blankImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
-    
-    // Draw grid lines
-    for (int i = 0; i < width; i += 100) {
-        cv::line(blankImage, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(200, 200, 200), 1);
-    }
-    for (int i = 0; i < height; i += 100) {
-        cv::line(blankImage, cv::Point(0, i), cv::Point(width, i), cv::Scalar(200, 200, 200), 1);
-    }
-    
-    // Draw coordinate frame
-    cv::putText(blankImage, "N: " + std::to_string(north), cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "S: " + std::to_string(south), cv::Point(10, height - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    
     // Calculate the center of the bounding box
     double centerLat = (north + south) / 2.0;
     double centerLon = (east + west) / 2.0;
     
-    // Try to use LINZ topo map as a fallback
-    int zoom = 12;
+    // Calculate appropriate zoom level based on the bounding box size
+    double latDiff = north - south;
+    double lonDiff = east - west;
+    int zoom = 12; // Default zoom level
+    
+    // Adjust zoom level based on the area size
+    if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
+    else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
+    
+    // Convert lat/lon to tile coordinates (Web Mercator)
     int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
     int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
     
-    // Use LINZ imagery with EPSG:3857 projection (Web Mercator)
-    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/imagery/EPSG:3857/" + 
+    // Use OpenStreetMap tile server
+    std::string url = "https://tile.openstreetmap.org/" + 
                       std::to_string(zoom) + "/" + 
                       std::to_string(x) + "/" + 
                       std::to_string(y) + 
-                      ".png?api=d01egend5f7kzm4m56pdbgng";
+                      ".png";
     
-    std::cout << "Trying LINZ imagery as fallback: " << url << std::endl;
+    std::cout << "Downloading map from OpenStreetMap: " << url << std::endl;
     
     curl = curl_easy_init();
     if(curl) {
@@ -191,6 +207,8 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
             cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
             
             if (!img.empty()) {
+                // Resize to requested dimensions
+                cv::resize(img, img, cv::Size(width, height));
                 return img;
             } else {
                 std::cerr << "Failed to decode image data from OpenStreetMap" << std::endl;
@@ -200,8 +218,24 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
         }
     }
     
-    // Return empty image if all attempts fail
-    return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    // If all attempts fail, create a blank image with grid lines
+    cv::Mat blankImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    
+    // Draw grid lines
+    for (int i = 0; i < width; i += 100) {
+        cv::line(blankImage, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(200, 200, 200), 1);
+    }
+    for (int i = 0; i < height; i += 100) {
+        cv::line(blankImage, cv::Point(0, i), cv::Point(width, i), cv::Scalar(200, 200, 200), 1);
+    }
+    
+    // Draw coordinate frame
+    cv::putText(blankImage, "N: " + std::to_string(north), cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "S: " + std::to_string(south), cv::Point(10, height - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    
+    return blankImage;
 }
 
 // Function to parse GPX file
@@ -443,7 +477,18 @@ void createVisualization(const std::string& filename,
     south -= latPadding;
     east += lonPadding;
     west -= lonPadding;
-    
+
+    // Calculate Web Mercator bounds from the padded lat/lon box
+    double mercatorNW_x, mercatorNW_y, mercatorSE_x, mercatorSE_y;
+    latLonToWebMercator(north, west, mercatorNW_x, mercatorNW_y);
+    latLonToWebMercator(south, east, mercatorSE_x, mercatorSE_y);
+    double xPadding = (mercatorSE_x - mercatorNW_x) * 0.05;
+    double yPadding = (mercatorSE_y - mercatorNW_y) * 0.05;
+    double westMerc = mercatorNW_x - xPadding;
+    double eastMerc = mercatorSE_x + xPadding;
+    double northMerc = mercatorNW_y - yPadding;
+    double southMerc = mercatorSE_y + yPadding;
+
     // Create image
     int width = 1200;
     int height = 800;
@@ -455,25 +500,56 @@ void createVisualization(const std::string& filename,
         img = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
     }
     
-    // Function to convert lat/lon to pixel coordinates
-    auto latLonToPixel = [&](double lat, double lon) -> cv::Point {
-        int x = static_cast<int>((lon - west) / (east - west) * width);
-        int y = static_cast<int>((north - lat) / (north - south) * height);
-        return cv::Point(x, y);
-    };
+    // Calculate Web Mercator for all four corners
+    double nw_x, nw_y, ne_x, ne_y, sw_x, sw_y, se_x, se_y;
+    latLonToWebMercator(north, west, nw_x, nw_y);
+    latLonToWebMercator(north, east, ne_x, ne_y);
+    latLonToWebMercator(south, west, sw_x, sw_y);
+    latLonToWebMercator(south, east, se_x, se_y);
+
+    // Debug output
+    std::cout << "Bounding box in Web Mercator:" << std::endl;
+    std::cout << "North: " << northMerc << ", South: " << southMerc << std::endl;
+    std::cout << "West: " << westMerc << ", East: " << eastMerc << std::endl;
     
     // Draw original track in blue
     for (size_t i = 1; i < originalPoints.size(); i++) {
-        cv::Point p1 = latLonToPixel(originalPoints[i-1].lat, originalPoints[i-1].lon);
-        cv::Point p2 = latLonToPixel(originalPoints[i].lat, originalPoints[i].lon);
-        cv::line(img, p1, p2, cv::Scalar(255, 0, 0), 2);
+        double x1, y1, x2, y2;
+        latLonToWebMercator(originalPoints[i-1].lat, originalPoints[i-1].lon, x1, y1);
+        latLonToWebMercator(originalPoints[i].lat, originalPoints[i].lon, x2, y2);
+        
+        cv::Point p1 = webMercatorToPixel(x1, y1, westMerc, eastMerc, northMerc, southMerc, width, height);
+        cv::Point p2 = webMercatorToPixel(x2, y2, westMerc, eastMerc, northMerc, southMerc, width, height);
+        
+        // Debug output for first few points
+        if (i < 5) {
+            std::cout << "Point " << i << ":" << std::endl;
+            std::cout << "  Lat/Lon: " << originalPoints[i].lat << ", " << originalPoints[i].lon << std::endl;
+            std::cout << "  Web Mercator: " << x2 << ", " << y2 << std::endl;
+            std::cout << "  Pixel: " << p2.x << ", " << p2.y << std::endl;
+        }
+        
+        // Only draw if points are within image bounds
+        if (p1.x >= 0 && p1.x < width && p1.y >= 0 && p1.y < height &&
+            p2.x >= 0 && p2.x < width && p2.y >= 0 && p2.y < height) {
+            cv::line(img, p1, p2, cv::Scalar(255, 0, 0), 2);
+        }
     }
     
     // Draw simplified track in red
     for (size_t i = 1; i < simplifiedPoints.size(); i++) {
-        cv::Point p1 = latLonToPixel(simplifiedPoints[i-1].lat, simplifiedPoints[i-1].lon);
-        cv::Point p2 = latLonToPixel(simplifiedPoints[i].lat, simplifiedPoints[i].lon);
-        cv::line(img, p1, p2, cv::Scalar(0, 0, 255), 2);
+        double x1, y1, x2, y2;
+        latLonToWebMercator(simplifiedPoints[i-1].lat, simplifiedPoints[i-1].lon, x1, y1);
+        latLonToWebMercator(simplifiedPoints[i].lat, simplifiedPoints[i].lon, x2, y2);
+        
+        cv::Point p1 = webMercatorToPixel(x1, y1, westMerc, eastMerc, northMerc, southMerc, width, height);
+        cv::Point p2 = webMercatorToPixel(x2, y2, westMerc, eastMerc, northMerc, southMerc, width, height);
+        
+        // Only draw if points are within image bounds
+        if (p1.x >= 0 && p1.x < width && p1.y >= 0 && p1.y < height &&
+            p2.x >= 0 && p2.x < width && p2.y >= 0 && p2.y < height) {
+            cv::line(img, p1, p2, cv::Scalar(0, 0, 255), 2);
+        }
     }
     
     // Add legend
