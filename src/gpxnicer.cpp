@@ -46,42 +46,32 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     // Create a blank canvas to build the final image
     cv::Mat finalImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
     
-    // Calculate proper zoom level for the area
-    // This formula gives better results when we need to see details of a track
+    // Simplify zoom level calculation to a reliable approach
     double latDiff = north - south;
     double lonDiff = east - west;
+    
+    // Use a simpler formula to calculate zoom
+    // For a reliable background, start with a moderate zoom level
+    int zoom = 15; // Default zoom
+    
+    // Adjust based on area size (simpler calculation)
     double maxDiff = std::max(latDiff, lonDiff);
+    if (maxDiff > 1.0) zoom = 11;
+    else if (maxDiff > 0.5) zoom = 12;
+    else if (maxDiff > 0.25) zoom = 13;
+    else if (maxDiff > 0.1) zoom = 14;
+    else if (maxDiff > 0.05) zoom = 15;
+    else if (maxDiff > 0.01) zoom = 16;
+    else zoom = 17;
     
-    // Adjust zoom based on the geographic area size
-    // Higher zoom = more detail but more tiles needed
-    int zoom = 17; // Start with a higher default for better GPX track detail
+    // Cap zoom level for safety
+    if (zoom < 8) zoom = 8;
+    if (zoom > 18) zoom = 18;
     
-    if (maxDiff > 1.0) zoom = 11;      // Very large area
-    else if (maxDiff > 0.5) zoom = 12; // Large area
-    else if (maxDiff > 0.1) zoom = 14; // Medium area
-    else if (maxDiff > 0.05) zoom = 15; // Medium-small area
-    else if (maxDiff > 0.01) zoom = 16; // Small area
-    else if (maxDiff > 0.005) zoom = 17; // Very small area
-    else zoom = 18;                    // Extremely small area
-    
-    // Ensure zoom is within valid range (0-22 for Web Mercator)
-    if (zoom < 0) zoom = 0;
-    if (zoom > 20) zoom = 20; // Cap at 20 for safety
-    
-    std::cout << "Using zoom level: " << zoom << " for area width: " << maxDiff << " degrees" << std::endl;
+    std::cout << "Using zoom level: " << zoom << " for area size: " << maxDiff << " degrees" << std::endl;
     
     // LINZ Basemap API key (standard access)
-    const std::string api_key = "d01jrm3t2gzdycm5j8rh03e69fw";  // Demo key from LINZ docs
-    
-    // Tile to lat/lon conversion helpers for this zoom level
-    auto tileToLon = [zoom](int x) -> double {
-        return x / std::pow(2.0, zoom) * 360.0 - 180.0;
-    };
-    
-    auto tileToLat = [zoom](int y) -> double {
-        double n = M_PI - 2.0 * M_PI * y / std::pow(2.0, zoom);
-        return 180.0 / M_PI * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
-    };
+    const std::string api_key = "d01jrm3t2gzdycm5j8rh03e69fw"; // Demo key from LINZ docs
     
     // Function to convert lat/lon to tile numbers
     auto latLonToTile = [zoom](double lat, double lon, int& x, int& y) {
@@ -102,43 +92,39 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     if (minX > maxX) std::swap(minX, maxX);
     if (minY > maxY) std::swap(minY, maxY);
     
-    // Limit the number of tiles to prevent excessive requests
-    const int MAX_TILES = 9; // 3x3 grid max
+    // Limit the number of tiles to a reasonable amount
     int tilesX = maxX - minX + 1;
     int tilesY = maxY - minY + 1;
+    int totalTiles = tilesX * tilesY;
     
-    if (tilesX * tilesY > MAX_TILES) {
-        // If too many tiles, adjust to the center of the area
+    // If we need too many tiles, reduce the range to the center
+    const int MAX_TILES = 16; // Maximum number of tiles to download
+    if (totalTiles > MAX_TILES) {
+        std::cout << "Limiting from " << totalTiles << " tiles to max " << MAX_TILES << std::endl;
+        // Calculate the center tile
         int centerX = (minX + maxX) / 2;
         int centerY = (minY + maxY) / 2;
         
-        // This gives us a 3x3 grid of tiles centered on the area of interest
-        minX = centerX - 1;
-        maxX = centerX + 1;
-        minY = centerY - 1;
-        maxY = centerY + 1;
+        // Calculate how many tiles we can have in each direction
+        int tilesPerSide = static_cast<int>(sqrt(MAX_TILES));
+        int halfTilesX = tilesPerSide / 2;
+        int halfTilesY = tilesPerSide / 2;
         
+        // Update the tile range
+        minX = centerX - halfTilesX;
+        maxX = centerX + halfTilesX;
+        minY = centerY - halfTilesY;
+        maxY = centerY + halfTilesY;
+        
+        // Recalculate tile counts
         tilesX = maxX - minX + 1;
         tilesY = maxY - minY + 1;
+        totalTiles = tilesX * tilesY;
     }
     
-    // Calculate the exact lat/lon bounds of this tile grid
-    double tileGridWest = tileToLon(minX);
-    double tileGridEast = tileToLon(maxX + 1);  // +1 because tiles cover [minX, maxX+1)
-    double tileGridNorth = tileToLat(minY);
-    double tileGridSouth = tileToLat(maxY + 1); // +1 because tiles cover [minY, maxY+1)
+    std::cout << "Downloading " << tilesX << "x" << tilesY << " = " << totalTiles << " tiles from LINZ" << std::endl;
     
-    std::cout << "Downloading " << tilesX << "x" << tilesY << " tiles from LINZ" << std::endl;
-    std::cout << "Tile grid covers: North=" << tileGridNorth << ", South=" << tileGridSouth
-              << ", East=" << tileGridEast << ", West=" << tileGridWest << std::endl;
-    std::cout << "GPX area covers: North=" << north << ", South=" << south
-              << ", East=" << east << ", West=" << west << std::endl;
-    
-    // Download and stitch tiles
-    std::vector<cv::Mat> tiles;
-    std::vector<std::pair<int, int>> tilePositions;
-    const int tileSize = 256; // Standard tile size
-    
+    // Initialize curl
     curl = curl_easy_init();
     if (!curl) {
         std::cerr << "Failed to initialize curl" << std::endl;
@@ -150,158 +136,137 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     
-    // Try to download a single tile first to test connectivity
+    // Verify connection with a single test tile
     std::string testBuffer;
     int testX = (minX + maxX) / 2;
     int testY = (minY + maxY) / 2;
     
-    // Build the LINZ Basemap URL with PNG format
     std::string testUrl = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
                           std::to_string(zoom) + "/" + 
                           std::to_string(testX) + "/" + 
                           std::to_string(testY) + 
-                          ".png?api=" + api_key;  // Use PNG format which is more widely supported
+                          ".jpeg?api=" + api_key; // Use JPEG for better compatibility
     
-    std::cout << "Testing connection with tile URL: " << testUrl << std::endl;
+    std::cout << "Testing with URL: " << testUrl << std::endl;
     
     curl_easy_setopt(curl, CURLOPT_URL, testUrl.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &testBuffer);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10 second timeout
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L); // 15 second timeout
     
     res = curl_easy_perform(curl);
-    
     if (res != CURLE_OK) {
         std::cerr << "Test tile download failed: " << curl_easy_strerror(res) << std::endl;
-        std::cerr << "Check your internet connection or the LINZ API status." << std::endl;
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        return finalImage;
+        return finalImage; // Return blank image
     }
     
-    // Try to decode the test image
-    bool canUseLinz = false;
-    if (!testBuffer.empty()) {
-        std::vector<char> testData(testBuffer.begin(), testBuffer.end());
-        cv::Mat testImg = cv::imdecode(testData, cv::IMREAD_COLOR);
-        canUseLinz = !testImg.empty();
-        
-        if (canUseLinz) {
-            std::cout << "Successfully connected to LINZ API. Downloading tiles..." << std::endl;
+    // Verify that we can decode the test image
+    cv::Mat testImg;
+    try {
+        if (!testBuffer.empty()) {
+            std::vector<char> testData(testBuffer.begin(), testBuffer.end());
+            testImg = cv::imdecode(testData, cv::IMREAD_COLOR);
+            
+            if (testImg.empty()) {
+                std::cerr << "Failed to decode test image, check format compatibility" << std::endl;
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                return finalImage; // Return blank image
+            }
+            
+            std::cout << "Successfully verified connectivity with LINZ API" << std::endl;
         } else {
-            std::cerr << "Failed to decode test tile. Falling back to blank background." << std::endl;
+            std::cerr << "Empty response from LINZ server" << std::endl;
             curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
-            return finalImage;
+            return finalImage; // Return blank image
         }
-    } else {
-        std::cerr << "Empty response from LINZ server for test tile." << std::endl;
+    } catch (const cv::Exception& e) {
+        std::cerr << "OpenCV exception decoding test image: " << e.what() << std::endl;
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        return finalImage;
+        return finalImage; // Return blank image
     }
     
+    // Set up our stitched image container
+    const int tileSize = 256; // Standard tile size
+    cv::Mat stitchedImage(tilesY * tileSize, tilesX * tileSize, CV_8UC3, cv::Scalar(255, 255, 255));
+    
     // Download each tile
-    bool anyTileSuccess = false;
+    int successfulTiles = 0;
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
-            std::string readBuffer;
+            std::string buffer;
             
-            // Build the LINZ Basemap URL with PNG format
+            // Use JPEG format for compatibility
             std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
                              std::to_string(zoom) + "/" + 
                              std::to_string(x) + "/" + 
                              std::to_string(y) + 
-                             ".png?api=" + api_key;  // Use PNG format
+                             ".jpeg?api=" + api_key;
             
-            if (x == minX && y == minY) {
-                std::cout << "Downloading tiles with URL pattern: " << url << std::endl;
-                std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
-            }
+            // Update progress
+            std::cout << "Downloading tile " << (successfulTiles + 1) << "/" << totalTiles 
+                      << " (" << (successfulTiles * 100 / totalTiles) << "%)\r" << std::flush;
             
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
             
             res = curl_easy_perform(curl);
-            
             if (res != CURLE_OK) {
-                std::cerr << "Failed to download tile at x=" << x << ", y=" << y << ": " << curl_easy_strerror(res) << std::endl;
+                std::cerr << std::endl << "Failed to download tile at x=" << x << ", y=" << y 
+                          << ": " << curl_easy_strerror(res) << std::endl;
                 continue;
             }
             
-            // Convert response to OpenCV image
-            if (!readBuffer.empty()) {
-                std::vector<char> data(readBuffer.begin(), readBuffer.end());
-                cv::Mat tileImg = cv::imdecode(data, cv::IMREAD_COLOR);
-                
-                if (!tileImg.empty()) {
-                    tiles.push_back(tileImg);
-                    tilePositions.push_back(std::make_pair(x - minX, y - minY));
-                    anyTileSuccess = true;
-                } else {
-                    std::cerr << "Failed to decode tile image at x=" << x << ", y=" << y << std::endl;
+            try {
+                if (!buffer.empty()) {
+                    std::vector<char> data(buffer.begin(), buffer.end());
+                    cv::Mat tileImg = cv::imdecode(data, cv::IMREAD_COLOR);
+                    
+                    if (!tileImg.empty()) {
+                        // Calculate position in stitched image
+                        int posX = (x - minX) * tileSize;
+                        int posY = (y - minY) * tileSize;
+                        
+                        // Create ROI in stitched image
+                        cv::Rect roi(posX, posY, tileSize, tileSize);
+                        
+                        // Copy tile into stitched image
+                        tileImg.copyTo(stitchedImage(roi));
+                        successfulTiles++;
+                    } else {
+                        std::cerr << std::endl << "Failed to decode tile at x=" << x << ", y=" << y << std::endl;
+                    }
                 }
+            } catch (const cv::Exception& e) {
+                std::cerr << std::endl << "OpenCV exception processing tile at x=" << x << ", y=" << y 
+                          << ": " << e.what() << std::endl;
             }
         }
     }
+    std::cout << std::endl << "Successfully downloaded " << successfulTiles << "/" << totalTiles << " tiles" << std::endl;
     
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     
-    if (!anyTileSuccess) {
-        std::cerr << "Failed to download any tiles from LINZ" << std::endl;
+    if (successfulTiles == 0) {
+        std::cerr << "Failed to download any tiles, returning blank image" << std::endl;
         return finalImage;
     }
     
-    // Create a larger canvas to hold all tiles
-    int fullWidth = tilesX * tileSize;
-    int fullHeight = tilesY * tileSize;
-    cv::Mat stitchedImage(fullHeight, fullWidth, CV_8UC3, cv::Scalar(255, 255, 255));
-    
-    // Place tiles in the correct positions
-    for (size_t i = 0; i < tiles.size(); i++) {
-        int tileX = tilePositions[i].first;
-        int tileY = tilePositions[i].second;
-        
-        cv::Rect roi(tileX * tileSize, tileY * tileSize, tileSize, tileSize);
-        if (roi.x + roi.width <= stitchedImage.cols && roi.y + roi.height <= stitchedImage.rows) {
-            tiles[i].copyTo(stitchedImage(roi));
-        }
+    // Resize to fit the final dimensions
+    try {
+        cv::resize(stitchedImage, finalImage, cv::Size(width, height), 0, 0, cv::INTER_AREA);
+        std::cout << "Successfully resized satellite image to " << width << "x" << height << std::endl;
+    } catch (const cv::Exception& e) {
+        std::cerr << "Error resizing image: " << e.what() << std::endl;
+        // Return the original blank image
+        return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
     }
-    
-    // Now we need to crop the stitched image to match exactly our GPX bounds
-    // Find the pixel coordinates in the stitched image that correspond to our GPX bounds
-    auto lonToPixelX = [tileGridWest, tileGridEast, fullWidth](double lon) -> int {
-        return static_cast<int>((lon - tileGridWest) / (tileGridEast - tileGridWest) * fullWidth);
-    };
-    
-    auto latToPixelY = [tileGridNorth, tileGridSouth, fullHeight](double lat) -> int {
-        return static_cast<int>((tileGridNorth - lat) / (tileGridNorth - tileGridSouth) * fullHeight);
-    };
-    
-    // Calculate crop region
-    int cropX = lonToPixelX(west);
-    int cropY = latToPixelY(north);
-    int cropWidth = lonToPixelX(east) - cropX;
-    int cropHeight = latToPixelY(south) - cropY;
-    
-    // Ensure crop region is valid
-    cropX = std::max(0, std::min(fullWidth - 1, cropX));
-    cropY = std::max(0, std::min(fullHeight - 1, cropY));
-    cropWidth = std::max(1, std::min(fullWidth - cropX, cropWidth));
-    cropHeight = std::max(1, std::min(fullHeight - cropY, cropHeight));
-    
-    // Crop the image
-    cv::Mat croppedImage;
-    cv::Rect cropROI(cropX, cropY, cropWidth, cropHeight);
-    croppedImage = stitchedImage(cropROI);
-    
-    // Resize to desired dimensions
-    cv::resize(croppedImage, finalImage, cv::Size(width, height));
-    
-    // Apply a slight blur to make the satellite imagery less distracting
-    cv::GaussianBlur(finalImage, finalImage, cv::Size(3, 3), 0);
     
     return finalImage;
 }
