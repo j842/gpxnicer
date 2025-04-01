@@ -16,9 +16,6 @@ struct GpxPoint {
     std::string time;
 };
 
-// Forward declaration for the fallback function
-cv::Mat downloadOpenStreetMapTile(double north, double south, double east, double west, int width, int height);
-
 // Convert WGS84 (lat/lon) to Web Mercator coordinates
 void latLonToWebMercator(double lat, double lon, double& x, double& y) {
     // Convert to radians
@@ -28,15 +25,6 @@ void latLonToWebMercator(double lat, double lon, double& x, double& y) {
     // Web Mercator projection (EPSG:3857)
     x = (lon + M_PI) / (2.0 * M_PI);
     y = (1.0 - log(tan(lat) + 1.0 / cos(lat)) / M_PI) / 2.0;
-}
-
-// Convert Web Mercator coordinates to pixel coordinates
-cv::Point webMercatorToPixel(double x, double y, double west, double east, double north, double south, int width, int height) {
-    // Convert Web Mercator coordinates to pixel coordinates
-    int pixelX = static_cast<int>(std::round(((x - west) / (east - west)) * width));
-    int pixelY = static_cast<int>(std::round(((y - north) / (south - north)) * height));
-    
-    return cv::Point(pixelX, pixelY);
 }
 
 // Function to write CURL data to memory
@@ -50,192 +38,225 @@ size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) 
     }
 }
 
-// Function to download map tile from LINZ
-cv::Mat downloadMapTile(double north, double south, double east, double west, int width, int height) {
+// Function to download satellite imagery from LINZ Basemaps API
+cv::Mat downloadLinzSatelliteImage(double north, double south, double east, double west, int width, int height) {
     CURL* curl;
     CURLcode res;
-    std::string readBuffer;
     
-    // Calculate the center of the bounding box
-    double centerLat = (north + south) / 2.0;
-    double centerLon = (east + west) / 2.0;
+    // Create a blank canvas to build the final image
+    cv::Mat finalImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
     
-    // Dynamically calculate zoom level based on region width and output image width.
-    // At zoom level z, one tile covers a normalized width of 1/(2^z) (with nominal tile size 256px).
-    // Using our conversion, the relation is:
-    //   2^z ≈ (width * 360) / (256 * (east - west))
-    // Thus, z = log2((width * 360) / (256 * (east - west)))
-    double regionWidthDeg = east - west; // in degrees
-    double computed = (width * 360.0) / (256.0 * regionWidthDeg);
-    int calculatedZoom = static_cast<int>(std::log2(computed));
-    // Clamp zoom to a valid range (e.g., 0 to 19)
-    if (calculatedZoom < 0) calculatedZoom = 0;
-    if (calculatedZoom > 19) calculatedZoom = 19;
-    int zoom = calculatedZoom;
-    
-    // Use LINZ basemap API with aerial imagery
-    // Format: https://basemaps.linz.govt.nz/v1/tiles/{tileset_name}/{crs}/{z}/{x}/{y}.{format}?api={api_key}
-    
-    // Convert lat/lon to tile coordinates (Web Mercator)
-    int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
-    int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
-    y = (1 << zoom) - 1 - y; // Flip y coordinate for LINZ tile service to correct offset
-    
-    // Use aerial imagery with EPSG:3857 projection (Web Mercator)
-    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
-                      std::to_string(zoom) + "/" + 
-                      std::to_string(x) + "/" + 
-                      std::to_string(y) + 
-                      ".png?api=d01jrm3t2gzdycm5j8rh03e69fw";
-    
-    std::cout << "Downloading map from LINZ: " << url << std::endl;
-    std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
-    
-    curl = curl_easy_init();
-    if(curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        
-        // Set up headers to look like a browser request
-        struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-        headers = curl_slist_append(headers, "Accept: image/jpeg,image/png,*/*");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        
-        res = curl_easy_perform(curl);
-        
-        if(res != CURLE_OK) {
-            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
-            curl_easy_cleanup(curl);
-            curl_slist_free_all(headers);
-            
-            // Try fallback to OpenStreetMap if LINZ fails
-            return downloadOpenStreetMapTile(north, south, east, west, width, height);
-        }
-        
-        curl_easy_cleanup(curl);
-        curl_slist_free_all(headers);
-        
-        // Convert response to OpenCV image
-        if (!readBuffer.empty()) {
-            std::vector<char> data(readBuffer.begin(), readBuffer.end());
-            cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
-            
-            if (!img.empty()) {
-                // Resize to requested dimensions
-                cv::resize(img, img, cv::Size(width, height));
-                return img;
-            } else {
-                std::cerr << "Failed to decode image data from LINZ" << std::endl;
-                // Try fallback
-                return downloadOpenStreetMapTile(north, south, east, west, width, height);
-            }
-        } else {
-            std::cerr << "Empty response from LINZ server" << std::endl;
-            // Try fallback
-            return downloadOpenStreetMapTile(north, south, east, west, width, height);
-        }
-    } else {
-        std::cerr << "Failed to initialize curl" << std::endl;
-    }
-    
-    // Return empty image if download fails
-    return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
-}
-
-// Fallback function to download map tile from OpenStreetMap
-cv::Mat downloadOpenStreetMapTile(double north, double south, double east, double west, int width, int height) {
-    CURL* curl;
-    CURLcode res;
-    std::string readBuffer;
-    
-    std::cout << "Falling back to OpenStreetMap..." << std::endl;
-    
-    // Calculate the center of the bounding box
-    double centerLat = (north + south) / 2.0;
-    double centerLon = (east + west) / 2.0;
-    
-    // Calculate appropriate zoom level based on the bounding box size
+    // Calculate proper zoom level for the area
+    // This formula gives better results when we need to see details of a track
     double latDiff = north - south;
     double lonDiff = east - west;
-    int zoom = 12; // Default zoom level
+    double maxDiff = std::max(latDiff, lonDiff);
     
-    // Adjust zoom level based on the area size
-    if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
-    else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
+    // Adjust zoom based on the geographic area size
+    // The smaller the area, the higher the zoom level
+    int zoom = 15; // Start with a reasonable default for GPX tracks
     
-    // Convert lat/lon to tile coordinates (Web Mercator)
-    int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
-    int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
+    if (maxDiff > 1.0) zoom = 9;      // Very large area
+    else if (maxDiff > 0.5) zoom = 10; // Large area
+    else if (maxDiff > 0.1) zoom = 12; // Medium area
+    else if (maxDiff > 0.05) zoom = 13; // Medium-small area
+    else if (maxDiff > 0.01) zoom = 14; // Small area
+    else if (maxDiff > 0.005) zoom = 15; // Very small area
+    else zoom = 16;                    // Extremely small area
     
-    // Use OpenStreetMap tile server
-    std::string url = "https://tile.openstreetmap.org/" + 
-                      std::to_string(zoom) + "/" + 
-                      std::to_string(x) + "/" + 
-                      std::to_string(y) + 
-                      ".png";
+    // Ensure zoom is within valid range (0-22 for Web Mercator)
+    if (zoom < 0) zoom = 0;
+    if (zoom > 20) zoom = 20; // Cap at 20 for safety
     
-    std::cout << "Downloading map from OpenStreetMap: " << url << std::endl;
+    std::cout << "Using zoom level: " << zoom << " for area width: " << maxDiff << " degrees" << std::endl;
+    
+    // LINZ Basemap API key (standard access)
+    const std::string api_key = "d01jrm3t2gzdycm5j8rh03e69fw";  // Demo key from LINZ docs
+    
+    // Function to convert lat/lon to tile numbers
+    auto latLonToTile = [zoom](double lat, double lon, int& x, int& y) {
+        // Convert to radians
+        double latRad = lat * M_PI / 180.0;
+        
+        // Calculate tile coordinates
+        x = static_cast<int>((lon + 180.0) / 360.0 * (1 << zoom));
+        y = static_cast<int>((1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / M_PI) / 2.0 * (1 << zoom));
+    };
+    
+    // Calculate tile range that covers our area
+    int minX, minY, maxX, maxY;
+    latLonToTile(north, west, minX, minY);
+    latLonToTile(south, east, maxX, maxY);
+    
+    // Ensure we have the correct order
+    if (minX > maxX) std::swap(minX, maxX);
+    if (minY > maxY) std::swap(minY, maxY);
+    
+    // Limit the number of tiles to prevent excessive requests
+    const int MAX_TILES = 9; // 3x3 grid max (reduced from 4x4)
+    int tilesX = maxX - minX + 1;
+    int tilesY = maxY - minY + 1;
+    
+    if (tilesX * tilesY > MAX_TILES) {
+        // If too many tiles, adjust to the center of the area
+        int centerX = (minX + maxX) / 2;
+        int centerY = (minY + maxY) / 2;
+        
+        // This gives us a 3x3 grid of tiles centered on the area of interest
+        minX = centerX - 1;
+        maxX = centerX + 1;
+        minY = centerY - 1;
+        maxY = centerY + 1;
+        
+        tilesX = maxX - minX + 1;
+        tilesY = maxY - minY + 1;
+    }
+    
+    std::cout << "Downloading " << tilesX << "x" << tilesY << " tiles from LINZ" << std::endl;
+    
+    // Download and stitch tiles
+    std::vector<cv::Mat> tiles;
+    std::vector<std::pair<int, int>> tilePositions;
+    const int tileSize = 256; // Standard tile size
     
     curl = curl_easy_init();
-    if(curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        
-        // Set up headers to look like a browser request
-        struct curl_slist *headers = NULL;
-        headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        
-        res = curl_easy_perform(curl);
-        
-        if(res != CURLE_OK) {
-            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
-            curl_easy_cleanup(curl);
-            curl_slist_free_all(headers);
-            return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
-        }
-        
-        curl_easy_cleanup(curl);
+    if (!curl) {
+        std::cerr << "Failed to initialize curl" << std::endl;
+        return finalImage;
+    }
+    
+    // Set up headers to look like a browser request
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    
+    // Try to download a single tile first to test connectivity
+    std::string testBuffer;
+    int testX = (minX + maxX) / 2;
+    int testY = (minY + maxY) / 2;
+    
+    // Build the LINZ Basemap URL with PNG format
+    std::string testUrl = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
+                          std::to_string(zoom) + "/" + 
+                          std::to_string(testX) + "/" + 
+                          std::to_string(testY) + 
+                          ".png?api=" + api_key;  // Use PNG format which is more widely supported
+    
+    std::cout << "Testing connection with tile URL: " << testUrl << std::endl;
+    
+    curl_easy_setopt(curl, CURLOPT_URL, testUrl.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &testBuffer);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10 second timeout
+    
+    res = curl_easy_perform(curl);
+    
+    if (res != CURLE_OK) {
+        std::cerr << "Test tile download failed: " << curl_easy_strerror(res) << std::endl;
+        std::cerr << "Check your internet connection or the LINZ API status." << std::endl;
         curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        return finalImage;
+    }
+    
+    // Try to decode the test image
+    bool canUseLinz = false;
+    if (!testBuffer.empty()) {
+        std::vector<char> testData(testBuffer.begin(), testBuffer.end());
+        cv::Mat testImg = cv::imdecode(testData, cv::IMREAD_COLOR);
+        canUseLinz = !testImg.empty();
         
-        // Convert response to OpenCV image
-        if (!readBuffer.empty()) {
-            std::vector<char> data(readBuffer.begin(), readBuffer.end());
-            cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
-            
-            if (!img.empty()) {
-                // Resize to requested dimensions
-                cv::resize(img, img, cv::Size(width, height));
-                return img;
-            } else {
-                std::cerr << "Failed to decode image data from OpenStreetMap" << std::endl;
-            }
+        if (canUseLinz) {
+            std::cout << "Successfully connected to LINZ API. Downloading tiles..." << std::endl;
         } else {
-            std::cerr << "Empty response from OpenStreetMap server" << std::endl;
+            std::cerr << "Failed to decode test tile. Falling back to blank background." << std::endl;
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            return finalImage;
+        }
+    } else {
+        std::cerr << "Empty response from LINZ server for test tile." << std::endl;
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        return finalImage;
+    }
+    
+    // Download each tile
+    bool anyTileSuccess = false;
+    for (int y = minY; y <= maxY; y++) {
+        for (int x = minX; x <= maxX; x++) {
+            std::string readBuffer;
+            
+            // Build the LINZ Basemap URL with PNG format
+            std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
+                             std::to_string(zoom) + "/" + 
+                             std::to_string(x) + "/" + 
+                             std::to_string(y) + 
+                             ".png?api=" + api_key;  // Use PNG format
+            
+            if (x == minX && y == minY) {
+                std::cout << "Downloading tiles with URL pattern: " << url << std::endl;
+                std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
+            }
+            
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+            
+            res = curl_easy_perform(curl);
+            
+            if (res != CURLE_OK) {
+                std::cerr << "Failed to download tile at x=" << x << ", y=" << y << ": " << curl_easy_strerror(res) << std::endl;
+                continue;
+            }
+            
+            // Convert response to OpenCV image
+            if (!readBuffer.empty()) {
+                std::vector<char> data(readBuffer.begin(), readBuffer.end());
+                cv::Mat tileImg = cv::imdecode(data, cv::IMREAD_COLOR);
+                
+                if (!tileImg.empty()) {
+                    tiles.push_back(tileImg);
+                    tilePositions.push_back(std::make_pair(x - minX, y - minY));
+                    anyTileSuccess = true;
+                } else {
+                    std::cerr << "Failed to decode tile image at x=" << x << ", y=" << y << std::endl;
+                }
+            }
         }
     }
     
-    // If all attempts fail, create a blank image with grid lines
-    cv::Mat blankImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
     
-    // Draw grid lines
-    for (int i = 0; i < width; i += 100) {
-        cv::line(blankImage, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(200, 200, 200), 1);
-    }
-    for (int i = 0; i < height; i += 100) {
-        cv::line(blankImage, cv::Point(0, i), cv::Point(width, i), cv::Scalar(200, 200, 200), 1);
+    if (!anyTileSuccess) {
+        std::cerr << "Failed to download any tiles from LINZ" << std::endl;
+        return finalImage;
     }
     
-    // Draw coordinate frame
-    cv::putText(blankImage, "N: " + std::to_string(north), cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "S: " + std::to_string(south), cv::Point(10, height - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-    cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    // Create a larger canvas to hold all tiles
+    int fullWidth = tilesX * tileSize;
+    int fullHeight = tilesY * tileSize;
+    cv::Mat stitchedImage(fullHeight, fullWidth, CV_8UC3, cv::Scalar(255, 255, 255));
     
-    return blankImage;
+    // Place tiles in the correct positions
+    for (size_t i = 0; i < tiles.size(); i++) {
+        int tileX = tilePositions[i].first;
+        int tileY = tilePositions[i].second;
+        
+        cv::Rect roi(tileX * tileSize, tileY * tileSize, tileSize, tileSize);
+        if (roi.x + roi.width <= stitchedImage.cols && roi.y + roi.height <= stitchedImage.rows) {
+            tiles[i].copyTo(stitchedImage(roi));
+        }
+    }
+    
+    // Resize the stitched image to match our desired dimensions
+    cv::resize(stitchedImage, finalImage, cv::Size(width, height));
+    
+    // Apply a slight blur to make the satellite imagery less distracting
+    cv::GaussianBlur(finalImage, finalImage, cv::Size(3, 3), 0);
+    
+    return finalImage;
 }
 
 // Function to parse GPX file
@@ -462,7 +483,7 @@ void writeGpxFile(const std::string& filename, const std::vector<GpxPoint>& poin
     xmlFreeDoc(doc);
 }
 
-// Function to create visualization
+// Function to create visualization with LINZ satellite imagery background
 void createVisualization(const std::string& filename, 
                         const std::vector<GpxPoint>& originalPoints,
                         const std::vector<GpxPoint>& simplifiedPoints) {
@@ -478,56 +499,52 @@ void createVisualization(const std::string& filename,
     east += lonPadding;
     west -= lonPadding;
 
-    // Calculate Web Mercator bounds from the padded lat/lon box
-    double mercatorNW_x, mercatorNW_y, mercatorSE_x, mercatorSE_y;
-    latLonToWebMercator(north, west, mercatorNW_x, mercatorNW_y);
-    latLonToWebMercator(south, east, mercatorSE_x, mercatorSE_y);
-    double xPadding = (mercatorSE_x - mercatorNW_x) * 0.05;
-    double yPadding = (mercatorSE_y - mercatorNW_y) * 0.05;
-    double westMerc = mercatorNW_x - xPadding;
-    double eastMerc = mercatorSE_x + xPadding;
-    double northMerc = mercatorNW_y - yPadding;
-    double southMerc = mercatorSE_y + yPadding;
-
     // Create image
     int width = 1200;
     int height = 800;
-    cv::Mat img = downloadMapTile(north, south, east, west, width, height);
     
-    // Check if the downloaded image is valid, if not create a blank image
+    // Download satellite imagery from LINZ as background
+    cv::Mat img = downloadLinzSatelliteImage(north, south, east, west, width, height);
+    
+    // Check if the downloaded image is valid, if not create a blank image with grid
     if (img.empty()) {
-        std::cerr << "Warning: Could not download map tile. Creating blank image instead." << std::endl;
+        std::cerr << "Warning: Could not download LINZ satellite imagery. Creating blank image instead." << std::endl;
         img = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+        
+        // Draw grid lines on blank background
+        for (int i = 0; i < width; i += 100) {
+            cv::line(img, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(220, 220, 220), 1);
+        }
+        for (int i = 0; i < height; i += 100) {
+            cv::line(img, cv::Point(0, i), cv::Point(width, i), cv::Scalar(220, 220, 220), 1);
+        }
+        
+        // Draw coordinate labels
+        cv::putText(img, "N: " + std::to_string(north), cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+        cv::putText(img, "S: " + std::to_string(south), cv::Point(10, height - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+        cv::putText(img, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+        cv::putText(img, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    } else {
+        // Add subtle grid lines on satellite image for better orientation
+        for (int i = 0; i < width; i += 200) {
+            cv::line(img, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(200, 200, 200, 128), 1);
+        }
+        for (int i = 0; i < height; i += 200) {
+            cv::line(img, cv::Point(0, i), cv::Point(width, i), cv::Scalar(200, 200, 200, 128), 1);
+        }
     }
     
-    // Calculate Web Mercator for all four corners
-    double nw_x, nw_y, ne_x, ne_y, sw_x, sw_y, se_x, se_y;
-    latLonToWebMercator(north, west, nw_x, nw_y);
-    latLonToWebMercator(north, east, ne_x, ne_y);
-    latLonToWebMercator(south, west, sw_x, sw_y);
-    latLonToWebMercator(south, east, se_x, se_y);
-
-    // Debug output
-    std::cout << "Bounding box in Web Mercator:" << std::endl;
-    std::cout << "North: " << northMerc << ", South: " << southMerc << std::endl;
-    std::cout << "West: " << westMerc << ", East: " << eastMerc << std::endl;
+    // Helper function to convert lat/lon to pixel coordinates
+    auto latLonToPixel = [&](double lat, double lon) -> cv::Point {
+        int x = static_cast<int>((lon - west) / (east - west) * width);
+        int y = static_cast<int>((north - lat) / (north - south) * height);
+        return cv::Point(x, y);
+    };
     
     // Draw original track in blue
     for (size_t i = 1; i < originalPoints.size(); i++) {
-        double x1, y1, x2, y2;
-        latLonToWebMercator(originalPoints[i-1].lat, originalPoints[i-1].lon, x1, y1);
-        latLonToWebMercator(originalPoints[i].lat, originalPoints[i].lon, x2, y2);
-        
-        cv::Point p1 = webMercatorToPixel(x1, y1, westMerc, eastMerc, northMerc, southMerc, width, height);
-        cv::Point p2 = webMercatorToPixel(x2, y2, westMerc, eastMerc, northMerc, southMerc, width, height);
-        
-        // Debug output for first few points
-        if (i < 5) {
-            std::cout << "Point " << i << ":" << std::endl;
-            std::cout << "  Lat/Lon: " << originalPoints[i].lat << ", " << originalPoints[i].lon << std::endl;
-            std::cout << "  Web Mercator: " << x2 << ", " << y2 << std::endl;
-            std::cout << "  Pixel: " << p2.x << ", " << p2.y << std::endl;
-        }
+        cv::Point p1 = latLonToPixel(originalPoints[i-1].lat, originalPoints[i-1].lon);
+        cv::Point p2 = latLonToPixel(originalPoints[i].lat, originalPoints[i].lon);
         
         // Only draw if points are within image bounds
         if (p1.x >= 0 && p1.x < width && p1.y >= 0 && p1.y < height &&
@@ -538,12 +555,8 @@ void createVisualization(const std::string& filename,
     
     // Draw simplified track in red
     for (size_t i = 1; i < simplifiedPoints.size(); i++) {
-        double x1, y1, x2, y2;
-        latLonToWebMercator(simplifiedPoints[i-1].lat, simplifiedPoints[i-1].lon, x1, y1);
-        latLonToWebMercator(simplifiedPoints[i].lat, simplifiedPoints[i].lon, x2, y2);
-        
-        cv::Point p1 = webMercatorToPixel(x1, y1, westMerc, eastMerc, northMerc, southMerc, width, height);
-        cv::Point p2 = webMercatorToPixel(x2, y2, westMerc, eastMerc, northMerc, southMerc, width, height);
+        cv::Point p1 = latLonToPixel(simplifiedPoints[i-1].lat, simplifiedPoints[i-1].lon);
+        cv::Point p2 = latLonToPixel(simplifiedPoints[i].lat, simplifiedPoints[i].lon);
         
         // Only draw if points are within image bounds
         if (p1.x >= 0 && p1.x < width && p1.y >= 0 && p1.y < height &&
@@ -552,16 +565,16 @@ void createVisualization(const std::string& filename,
         }
     }
     
-    // Add legend
-    cv::rectangle(img, cv::Point(10, 10), cv::Point(200, 60), cv::Scalar(255, 255, 255), -1);
+    // Add legend with white background for visibility
+    cv::rectangle(img, cv::Point(10, 10), cv::Point(200, 60), cv::Scalar(255, 255, 255, 200), -1);
     cv::line(img, cv::Point(20, 25), cv::Point(50, 25), cv::Scalar(255, 0, 0), 2);
     cv::putText(img, "Original", cv::Point(60, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     cv::line(img, cv::Point(20, 45), cv::Point(50, 45), cv::Scalar(0, 0, 255), 2);
     cv::putText(img, "Simplified", cv::Point(60, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     
-    // Add copyright notice
-    cv::rectangle(img, cv::Point(10, height - 30), cv::Point(350, height - 10), cv::Scalar(255, 255, 255, 128), -1);
-    cv::putText(img, "Map data: LINZ / OpenStreetMap contributors", cv::Point(15, height - 15), 
+    // Add attribution for LINZ data
+    cv::rectangle(img, cv::Point(10, height - 30), cv::Point(350, height - 10), cv::Scalar(255, 255, 255, 200), -1);
+    cv::putText(img, "Map data: LINZ Aerial Imagery", cv::Point(15, height - 15), 
                 cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 1);
     
     // Save image
