@@ -49,19 +49,14 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
     if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
     else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
     
-    // Create URL for LINZ basemap API with demo key
-    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
+    // Try using OpenTopoMap as it's more reliable
+    std::string url = "https://tile.opentopomap.org/" + 
                       std::to_string(zoom) + "/" + 
-                      std::to_string(centerLon) + "/" + 
-                      std::to_string(centerLat) + 
-                      ".jpg?api=d01egend5f7kzm4m56pdbgng";
+                      std::to_string(static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom))) + "/" + 
+                      std::to_string(static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom))) + 
+                      ".png";
     
-    std::cout << "Downloading map from LINZ: " << url << std::endl;
-    
-    // Check if we're using the demo key
-    if (url.find("d01egend5f7kzm4m56pdbgng") != std::string::npos) {
-        std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
-    }
+    std::cout << "Downloading map from OpenTopoMap: " << url << std::endl;
     
     curl = curl_easy_init();
     if(curl) {
@@ -124,12 +119,28 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
     
     std::cout << "Falling back to OpenStreetMap..." << std::endl;
     
-    // Create URL for OpenStreetMap
-    std::string url = "https://staticmap.openstreetmap.de/staticmap.php?center=" + 
-                      std::to_string((north + south) / 2.0) + "," + 
-                      std::to_string((east + west) / 2.0) + 
-                      "&zoom=12&size=" + std::to_string(width) + "x" + std::to_string(height) + 
-                      "&maptype=mapnik";
+    // Create a blank image with grid lines as a last resort
+    cv::Mat blankImage(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    
+    // Draw grid lines
+    for (int i = 0; i < width; i += 100) {
+        cv::line(blankImage, cv::Point(i, 0), cv::Point(i, height), cv::Scalar(200, 200, 200), 1);
+    }
+    for (int i = 0; i < height; i += 100) {
+        cv::line(blankImage, cv::Point(0, i), cv::Point(width, i), cv::Scalar(200, 200, 200), 1);
+    }
+    
+    // Draw coordinate frame
+    cv::putText(blankImage, "N: " + std::to_string(north), cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "S: " + std::to_string(south), cv::Point(10, height - 10), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    
+    // Try to use a different OpenStreetMap API
+    std::string url = "https://a.tile.openstreetmap.org/12/" + 
+                      std::to_string(static_cast<int>((east + 180.0) / 360.0 * (1 << 12))) + "/" + 
+                      std::to_string(static_cast<int>((1.0 - log(tan(north * M_PI / 180.0) + 1.0 / cos(north * M_PI / 180.0)) / M_PI) / 2.0 * (1 << 12))) + 
+                      ".png";
     
     std::cout << "Downloading map from: " << url << std::endl;
     
@@ -456,7 +467,7 @@ void createVisualization(const std::string& filename,
     
     // Add copyright notice
     cv::rectangle(img, cv::Point(10, height - 30), cv::Point(350, height - 10), cv::Scalar(255, 255, 255, 128), -1);
-    cv::putText(img, "Map data: LINZ / OpenStreetMap contributors", cv::Point(15, height - 15), 
+    cv::putText(img, "Map data: OpenTopoMap / OpenStreetMap contributors", cv::Point(15, height - 15), 
                 cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 1);
     
     // Save image
