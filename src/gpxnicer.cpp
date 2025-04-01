@@ -73,6 +73,16 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     // LINZ Basemap API key (standard access)
     const std::string api_key = "d01jrm3t2gzdycm5j8rh03e69fw";  // Demo key from LINZ docs
     
+    // Tile to lat/lon conversion helpers for this zoom level
+    auto tileToLon = [zoom](int x) -> double {
+        return x / std::pow(2.0, zoom) * 360.0 - 180.0;
+    };
+    
+    auto tileToLat = [zoom](int y) -> double {
+        double n = M_PI - 2.0 * M_PI * y / std::pow(2.0, zoom);
+        return 180.0 / M_PI * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
+    };
+    
     // Function to convert lat/lon to tile numbers
     auto latLonToTile = [zoom](double lat, double lon, int& x, int& y) {
         // Convert to radians
@@ -93,7 +103,7 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     if (minY > maxY) std::swap(minY, maxY);
     
     // Limit the number of tiles to prevent excessive requests
-    const int MAX_TILES = 9; // 3x3 grid max (reduced from 4x4)
+    const int MAX_TILES = 9; // 3x3 grid max
     int tilesX = maxX - minX + 1;
     int tilesY = maxY - minY + 1;
     
@@ -112,7 +122,17 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
         tilesY = maxY - minY + 1;
     }
     
+    // Calculate the exact lat/lon bounds of this tile grid
+    double tileGridWest = tileToLon(minX);
+    double tileGridEast = tileToLon(maxX + 1);  // +1 because tiles cover [minX, maxX+1)
+    double tileGridNorth = tileToLat(minY);
+    double tileGridSouth = tileToLat(maxY + 1); // +1 because tiles cover [minY, maxY+1)
+    
     std::cout << "Downloading " << tilesX << "x" << tilesY << " tiles from LINZ" << std::endl;
+    std::cout << "Tile grid covers: North=" << tileGridNorth << ", South=" << tileGridSouth
+              << ", East=" << tileGridEast << ", West=" << tileGridWest << std::endl;
+    std::cout << "GPX area covers: North=" << north << ", South=" << south
+              << ", East=" << east << ", West=" << west << std::endl;
     
     // Download and stitch tiles
     std::vector<cv::Mat> tiles;
@@ -250,8 +270,35 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
         }
     }
     
-    // Resize the stitched image to match our desired dimensions
-    cv::resize(stitchedImage, finalImage, cv::Size(width, height));
+    // Now we need to crop the stitched image to match exactly our GPX bounds
+    // Find the pixel coordinates in the stitched image that correspond to our GPX bounds
+    auto lonToPixelX = [tileGridWest, tileGridEast, fullWidth](double lon) -> int {
+        return static_cast<int>((lon - tileGridWest) / (tileGridEast - tileGridWest) * fullWidth);
+    };
+    
+    auto latToPixelY = [tileGridNorth, tileGridSouth, fullHeight](double lat) -> int {
+        return static_cast<int>((tileGridNorth - lat) / (tileGridNorth - tileGridSouth) * fullHeight);
+    };
+    
+    // Calculate crop region
+    int cropX = lonToPixelX(west);
+    int cropY = latToPixelY(north);
+    int cropWidth = lonToPixelX(east) - cropX;
+    int cropHeight = latToPixelY(south) - cropY;
+    
+    // Ensure crop region is valid
+    cropX = std::max(0, std::min(fullWidth - 1, cropX));
+    cropY = std::max(0, std::min(fullHeight - 1, cropY));
+    cropWidth = std::max(1, std::min(fullWidth - cropX, cropWidth));
+    cropHeight = std::max(1, std::min(fullHeight - cropY, cropHeight));
+    
+    // Crop the image
+    cv::Mat croppedImage;
+    cv::Rect cropROI(cropX, cropY, cropWidth, cropHeight);
+    croppedImage = stitchedImage(cropROI);
+    
+    // Resize to desired dimensions
+    cv::resize(croppedImage, finalImage, cv::Size(width, height));
     
     // Apply a slight blur to make the satellite imagery less distracting
     cv::GaussianBlur(finalImage, finalImage, cv::Size(3, 3), 0);
