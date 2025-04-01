@@ -40,3 +40,11 @@ make
 - libcurl
 - libxml2
 - OpenCV
+
+## Map Data
+
+This application uses map data from:
+- LINZ (Land Information New Zealand) with their demo API key
+- OpenStreetMap as a fallback option
+
+For production use, please obtain your own API key from LINZ.

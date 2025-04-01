@@ -16,6 +16,9 @@ struct GpxPoint {
     std::string time;
 };
 
+// Forward declaration for the fallback function
+cv::Mat downloadOpenStreetMapTile(double north, double south, double east, double west, int width, int height);
+
 // Function to write CURL data to memory
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
     size_t newLength = size * nmemb;
@@ -27,18 +30,106 @@ size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) 
     }
 }
 
-// Function to download map tile from OpenStreetMap
+// Function to download map tile from LINZ
 cv::Mat downloadMapTile(double north, double south, double east, double west, int width, int height) {
     CURL* curl;
     CURLcode res;
     std::string readBuffer;
     
-    // Create URL for static map API (using OpenStreetMap Static Map API)
-    std::string url = "https://maps.googleapis.com/maps/api/staticmap?center=" + 
+    // Calculate the center of the bounding box
+    double centerLat = (north + south) / 2.0;
+    double centerLon = (east + west) / 2.0;
+    
+    // Calculate appropriate zoom level based on the bounding box size
+    double latDiff = north - south;
+    double lonDiff = east - west;
+    int zoom = 12; // Default zoom level
+    
+    // Adjust zoom level based on the area size
+    if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
+    else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
+    
+    // Create URL for LINZ basemap API with demo key
+    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
+                      std::to_string(zoom) + "/" + 
+                      std::to_string(centerLon) + "/" + 
+                      std::to_string(centerLat) + 
+                      ".jpg?api=d01egend5f7kzm4m56pdbgng";
+    
+    std::cout << "Downloading map from LINZ: " << url << std::endl;
+    
+    // Check if we're using the demo key
+    if (url.find("d01egend5f7kzm4m56pdbgng") != std::string::npos) {
+        std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
+    }
+    
+    curl = curl_easy_init();
+    if(curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+        
+        // Set up headers to look like a browser request
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+        headers = curl_slist_append(headers, "Accept: image/jpeg,image/png,*/*");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        
+        res = curl_easy_perform(curl);
+        
+        if(res != CURLE_OK) {
+            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
+            curl_easy_cleanup(curl);
+            curl_slist_free_all(headers);
+            
+            // Try fallback to OpenStreetMap if LINZ fails
+            return downloadOpenStreetMapTile(north, south, east, west, width, height);
+        }
+        
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        
+        // Convert response to OpenCV image
+        if (!readBuffer.empty()) {
+            std::vector<char> data(readBuffer.begin(), readBuffer.end());
+            cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
+            
+            if (!img.empty()) {
+                // Resize to requested dimensions
+                cv::resize(img, img, cv::Size(width, height));
+                return img;
+            } else {
+                std::cerr << "Failed to decode image data from LINZ" << std::endl;
+                // Try fallback
+                return downloadOpenStreetMapTile(north, south, east, west, width, height);
+            }
+        } else {
+            std::cerr << "Empty response from LINZ server" << std::endl;
+            // Try fallback
+            return downloadOpenStreetMapTile(north, south, east, west, width, height);
+        }
+    } else {
+        std::cerr << "Failed to initialize curl" << std::endl;
+    }
+    
+    // Return empty image if download fails
+    return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+}
+
+// Fallback function to download map tile from OpenStreetMap
+cv::Mat downloadOpenStreetMapTile(double north, double south, double east, double west, int width, int height) {
+    CURL* curl;
+    CURLcode res;
+    std::string readBuffer;
+    
+    std::cout << "Falling back to OpenStreetMap..." << std::endl;
+    
+    // Create URL for OpenStreetMap
+    std::string url = "https://staticmap.openstreetmap.de/staticmap.php?center=" + 
                       std::to_string((north + south) / 2.0) + "," + 
                       std::to_string((east + west) / 2.0) + 
                       "&zoom=12&size=" + std::to_string(width) + "x" + std::to_string(height) + 
-                      "&maptype=satellite&key=YOUR_API_KEY"; // Replace with your API key
+                      "&maptype=mapnik";
     
     std::cout << "Downloading map from: " << url << std::endl;
     
@@ -47,15 +138,23 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+        
+        // Set up headers to look like a browser request
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        
         res = curl_easy_perform(curl);
         
         if(res != CURLE_OK) {
             std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
             curl_easy_cleanup(curl);
+            curl_slist_free_all(headers);
             return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
         }
         
         curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
         
         // Convert response to OpenCV image
         if (!readBuffer.empty()) {
@@ -65,16 +164,14 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
             if (!img.empty()) {
                 return img;
             } else {
-                std::cerr << "Failed to decode image data" << std::endl;
+                std::cerr << "Failed to decode image data from OpenStreetMap" << std::endl;
             }
         } else {
-            std::cerr << "Empty response from server" << std::endl;
+            std::cerr << "Empty response from OpenStreetMap server" << std::endl;
         }
-    } else {
-        std::cerr << "Failed to initialize curl" << std::endl;
     }
     
-    // Return empty image if download fails
+    // Return empty image if all attempts fail
     return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
 }
 
@@ -356,6 +453,11 @@ void createVisualization(const std::string& filename,
     cv::putText(img, "Original", cv::Point(60, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     cv::line(img, cv::Point(20, 45), cv::Point(50, 45), cv::Scalar(0, 0, 255), 2);
     cv::putText(img, "Simplified", cv::Point(60, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+    
+    // Add copyright notice
+    cv::rectangle(img, cv::Point(10, height - 30), cv::Point(350, height - 10), cv::Scalar(255, 255, 255, 128), -1);
+    cv::putText(img, "Map data: LINZ / OpenStreetMap contributors", cv::Point(15, height - 15), 
+                cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 1);
     
     // Save image
     try {
