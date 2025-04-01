@@ -50,17 +50,18 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
     else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
     
     // Use LINZ basemap API with aerial imagery
-    // Format: https://basemaps.linz.govt.nz/v1/tiles/aerial/WebMercatorQuad/{z}/{x}/{y}.webp?api=<key>
+    // Format: https://basemaps.linz.govt.nz/v1/tiles/{tileset_name}/{crs}/{z}/{x}/{y}.{format}?api={api_key}
     
     // Convert lat/lon to tile coordinates (Web Mercator)
     int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
     int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
     
-    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/WebMercatorQuad/" + 
+    // Use aerial imagery with EPSG:3857 projection (Web Mercator)
+    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/EPSG:3857/" + 
                       std::to_string(zoom) + "/" + 
                       std::to_string(x) + "/" + 
                       std::to_string(y) + 
-                      ".webp?api=d01egend5f7kzm4m56pdbgng";
+                      ".png?api=d01egend5f7kzm4m56pdbgng";
     
     std::cout << "Downloading map from LINZ: " << url << std::endl;
     std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
@@ -143,13 +144,18 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
     cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     
-    // Try to use a different OpenStreetMap API
-    std::string url = "https://a.tile.openstreetmap.org/12/" + 
-                      std::to_string(static_cast<int>((east + 180.0) / 360.0 * (1 << 12))) + "/" + 
-                      std::to_string(static_cast<int>((1.0 - log(tan(north * M_PI / 180.0) + 1.0 / cos(north * M_PI / 180.0)) / M_PI) / 2.0 * (1 << 12))) + 
-                      ".png";
+    // Try to use LINZ topo map as a fallback
+    int zoom = 12;
+    int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
+    int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
     
-    std::cout << "Downloading map from: " << url << std::endl;
+    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/topo50/EPSG:3857/" + 
+                      std::to_string(zoom) + "/" + 
+                      std::to_string(x) + "/" + 
+                      std::to_string(y) + 
+                      ".png?api=d01egend5f7kzm4m56pdbgng";
+    
+    std::cout << "Trying LINZ topo map as fallback: " << url << std::endl;
     
     curl = curl_easy_init();
     if(curl) {
