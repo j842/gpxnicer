@@ -144,18 +144,23 @@ cv::Mat downloadOpenStreetMapTile(double north, double south, double east, doubl
     cv::putText(blankImage, "W: " + std::to_string(west), cv::Point(10, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     cv::putText(blankImage, "E: " + std::to_string(east), cv::Point(width - 100, height / 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     
+    // Calculate the center of the bounding box
+    double centerLat = (north + south) / 2.0;
+    double centerLon = (east + west) / 2.0;
+    
     // Try to use LINZ topo map as a fallback
     int zoom = 12;
     int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
     int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
     
-    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/topo50/EPSG:3857/" + 
+    // Use LINZ imagery with EPSG:3857 projection (Web Mercator)
+    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/imagery/EPSG:3857/" + 
                       std::to_string(zoom) + "/" + 
                       std::to_string(x) + "/" + 
                       std::to_string(y) + 
                       ".png?api=d01egend5f7kzm4m56pdbgng";
     
-    std::cout << "Trying LINZ topo map as fallback: " << url << std::endl;
+    std::cout << "Trying LINZ imagery as fallback: " << url << std::endl;
     
     curl = curl_easy_init();
     if(curl) {
