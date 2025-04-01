@@ -53,16 +53,16 @@ cv::Mat downloadLinzSatelliteImage(double north, double south, double east, doub
     double maxDiff = std::max(latDiff, lonDiff);
     
     // Adjust zoom based on the geographic area size
-    // The smaller the area, the higher the zoom level
-    int zoom = 15; // Start with a reasonable default for GPX tracks
+    // Higher zoom = more detail but more tiles needed
+    int zoom = 17; // Start with a higher default for better GPX track detail
     
-    if (maxDiff > 1.0) zoom = 9;      // Very large area
-    else if (maxDiff > 0.5) zoom = 10; // Large area
-    else if (maxDiff > 0.1) zoom = 12; // Medium area
-    else if (maxDiff > 0.05) zoom = 13; // Medium-small area
-    else if (maxDiff > 0.01) zoom = 14; // Small area
-    else if (maxDiff > 0.005) zoom = 15; // Very small area
-    else zoom = 16;                    // Extremely small area
+    if (maxDiff > 1.0) zoom = 11;      // Very large area
+    else if (maxDiff > 0.5) zoom = 12; // Large area
+    else if (maxDiff > 0.1) zoom = 14; // Medium area
+    else if (maxDiff > 0.05) zoom = 15; // Medium-small area
+    else if (maxDiff > 0.01) zoom = 16; // Small area
+    else if (maxDiff > 0.005) zoom = 17; // Very small area
+    else zoom = 18;                    // Extremely small area
     
     // Ensure zoom is within valid range (0-22 for Web Mercator)
     if (zoom < 0) zoom = 0;
