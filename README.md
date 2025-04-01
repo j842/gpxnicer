@@ -44,8 +44,8 @@ make
 ## Map Data
 
 This application uses map data from:
-- OpenTopoMap (primary source)
+- LINZ (Land Information New Zealand) with their demo API key (primary source)
 - OpenStreetMap (fallback option)
 - If both fail, a blank grid with coordinates is generated
 
-Map data © OpenStreetMap contributors, available under the Open Database License.
+Map data © LINZ and OpenStreetMap contributors, available under the Open Database License.

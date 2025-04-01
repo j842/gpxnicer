@@ -49,14 +49,21 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
     if (latDiff > 0.5 || lonDiff > 0.5) zoom = 10;
     else if (latDiff < 0.05 || lonDiff < 0.05) zoom = 15;
     
-    // Try using OpenTopoMap as it's more reliable
-    std::string url = "https://tile.opentopomap.org/" + 
-                      std::to_string(zoom) + "/" + 
-                      std::to_string(static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom))) + "/" + 
-                      std::to_string(static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom))) + 
-                      ".png";
+    // Use LINZ basemap API with aerial imagery
+    // Format: https://basemaps.linz.govt.nz/v1/tiles/aerial/WebMercatorQuad/{z}/{x}/{y}.webp?api=<key>
     
-    std::cout << "Downloading map from OpenTopoMap: " << url << std::endl;
+    // Convert lat/lon to tile coordinates (Web Mercator)
+    int x = static_cast<int>((centerLon + 180.0) / 360.0 * (1 << zoom));
+    int y = static_cast<int>((1.0 - log(tan(centerLat * M_PI / 180.0) + 1.0 / cos(centerLat * M_PI / 180.0)) / M_PI) / 2.0 * (1 << zoom));
+    
+    std::string url = "https://basemaps.linz.govt.nz/v1/tiles/aerial/WebMercatorQuad/" + 
+                      std::to_string(zoom) + "/" + 
+                      std::to_string(x) + "/" + 
+                      std::to_string(y) + 
+                      ".webp?api=d01egend5f7kzm4m56pdbgng";
+    
+    std::cout << "Downloading map from LINZ: " << url << std::endl;
+    std::cout << "Note: Using LINZ demo API key. For production use, get your own key." << std::endl;
     
     curl = curl_easy_init();
     if(curl) {
@@ -467,7 +474,7 @@ void createVisualization(const std::string& filename,
     
     // Add copyright notice
     cv::rectangle(img, cv::Point(10, height - 30), cv::Point(350, height - 10), cv::Scalar(255, 255, 255, 128), -1);
-    cv::putText(img, "Map data: OpenTopoMap / OpenStreetMap contributors", cv::Point(15, height - 15), 
+    cv::putText(img, "Map data: LINZ / OpenStreetMap contributors", cv::Point(15, height - 15), 
                 cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 1);
     
     // Save image
