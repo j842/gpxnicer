@@ -40,18 +40,38 @@ cv::Mat downloadMapTile(double north, double south, double east, double west, in
                       "&zoom=12&size=" + std::to_string(width) + "x" + std::to_string(height) + 
                       "&maptype=satellite&key=YOUR_API_KEY"; // Replace with your API key
     
+    std::cout << "Downloading map from: " << url << std::endl;
+    
     curl = curl_easy_init();
     if(curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         res = curl_easy_perform(curl);
+        
+        if(res != CURLE_OK) {
+            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
+            curl_easy_cleanup(curl);
+            return cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+        }
+        
         curl_easy_cleanup(curl);
         
         // Convert response to OpenCV image
-        std::vector<char> data(readBuffer.begin(), readBuffer.end());
-        cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
-        return img;
+        if (!readBuffer.empty()) {
+            std::vector<char> data(readBuffer.begin(), readBuffer.end());
+            cv::Mat img = cv::imdecode(data, cv::IMREAD_COLOR);
+            
+            if (!img.empty()) {
+                return img;
+            } else {
+                std::cerr << "Failed to decode image data" << std::endl;
+            }
+        } else {
+            std::cerr << "Empty response from server" << std::endl;
+        }
+    } else {
+        std::cerr << "Failed to initialize curl" << std::endl;
     }
     
     // Return empty image if download fails
@@ -303,6 +323,12 @@ void createVisualization(const std::string& filename,
     int height = 800;
     cv::Mat img = downloadMapTile(north, south, east, west, width, height);
     
+    // Check if the downloaded image is valid, if not create a blank image
+    if (img.empty()) {
+        std::cerr << "Warning: Could not download map tile. Creating blank image instead." << std::endl;
+        img = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    }
+    
     // Function to convert lat/lon to pixel coordinates
     auto latLonToPixel = [&](double lat, double lon) -> cv::Point {
         int x = static_cast<int>((lon - west) / (east - west) * width);
@@ -332,7 +358,14 @@ void createVisualization(const std::string& filename,
     cv::putText(img, "Simplified", cv::Point(60, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
     
     // Save image
-    cv::imwrite(filename, img);
+    try {
+        bool success = cv::imwrite(filename, img);
+        if (!success) {
+            std::cerr << "Error: Failed to write image to " << filename << std::endl;
+        }
+    } catch (const cv::Exception& ex) {
+        std::cerr << "Exception while saving image: " << ex.what() << std::endl;
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -343,13 +376,28 @@ int main(int argc, char* argv[]) {
     }
     
     std::string inputFile = argv[1];
-    double thresholdPercent = std::stod(argv[2]);
+    double thresholdPercent;
+    
+    try {
+        thresholdPercent = std::stod(argv[2]);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: threshold_percent must be a valid number" << std::endl;
+        return 1;
+    }
     
     // Check if threshold is valid
     if (thresholdPercent <= 0 || thresholdPercent >= 100) {
         std::cerr << "Error: threshold_percent must be between 0 and 100" << std::endl;
         return 1;
     }
+    
+    // Check if input file exists
+    std::ifstream fileCheck(inputFile);
+    if (!fileCheck.good()) {
+        std::cerr << "Error: cannot open file " << inputFile << std::endl;
+        return 1;
+    }
+    fileCheck.close();
     
     // Parse GPX file
     std::vector<GpxPoint> originalPoints = parseGpxFile(inputFile);
@@ -366,10 +414,22 @@ int main(int argc, char* argv[]) {
     std::string outputJpgFile = inputFile.substr(0, inputFile.find_last_of('.')) + "_simplified.jpg";
     
     // Write simplified GPX file
-    writeGpxFile(outputGpxFile, simplifiedPoints);
+    try {
+        writeGpxFile(outputGpxFile, simplifiedPoints);
+        std::cout << "Successfully wrote GPX file: " << outputGpxFile << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error writing GPX file: " << e.what() << std::endl;
+        return 1;
+    }
     
     // Create visualization
-    createVisualization(outputJpgFile, originalPoints, simplifiedPoints);
+    try {
+        createVisualization(outputJpgFile, originalPoints, simplifiedPoints);
+        std::cout << "Successfully created visualization: " << outputJpgFile << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error creating visualization: " << e.what() << std::endl;
+        // Continue execution even if visualization fails
+    }
     
     // Print summary
     std::cout << "Original points: " << originalPoints.size() << std::endl;
