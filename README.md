@@ -44,8 +44,7 @@ make
 ## Map Data
 
 This application uses map data from:
-- LINZ (Land Information New Zealand) with their demo API key (primary source)
-- OpenStreetMap (fallback option)
-- If both fail, a blank grid with coordinates is generated
+- LINZ (Land Information New Zealand) aerial imagery using their API
+- If LINZ API access fails, a blank grid with coordinates is generated
 
-Map data © LINZ and OpenStreetMap contributors, available under the Open Database License.
+Map data © LINZ, available under Creative Commons 4.0 International license.
